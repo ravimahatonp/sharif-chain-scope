@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Area,
   AreaChart,
@@ -11,6 +11,15 @@ import { Transaction, TransactionFilters } from '../filters/types';
 import { useTransactionHistory } from '../hooks/useTransactionHistory';
 import { useLedgerStream } from '../hooks/useLedgerStream';
 import { AdvancedSearchPanel } from './AdvancedSearchPanel';
+import { MetricWidget, TrendChart } from './DashboardWidgets';
+import {
+  createDefaultDashboardPreferences,
+  DashboardPreferences,
+  DashboardWidgetId,
+  normalizeDashboardPreferences,
+  reorderDashboardWidgets,
+  updateVisibleWidgets,
+} from './dashboardPreferences';
 
 const WS_URL: string | null = (import.meta as unknown as { env: Record<string, string> }).env.VITE_LEDGER_WS_URL ?? null;
 
@@ -37,13 +46,48 @@ const getTransactionChartData = (transactions: Transaction[] = []): ChartPoint[]
 
 export const Dashboard: React.FC = () => {
   const [filters, setFilters] = useState<TransactionFilters>({});
+  const [preferences, setPreferences] = useState<DashboardPreferences>(() => createDefaultDashboardPreferences());
+  const [draggedWidget, setDraggedWidget] = useState<DashboardWidgetId | null>(null);
   const { data, isLoading, isError } = useTransactionHistory('0x123', filters);
   const chartData = useMemo(() => getTransactionChartData(data), [data]);
 
   const { transactions: liveTransactions, status: streamStatus } = useLedgerStream(WS_URL);
 
+  useEffect(() => {
+    try {
+      const rawPreferences = window.localStorage.getItem('dashboard-preferences');
+      const parsedPreferences = rawPreferences ? JSON.parse(rawPreferences) : null;
+      const normalized = normalizeDashboardPreferences(parsedPreferences);
+      if (normalized) {
+        setPreferences(normalized);
+      }
+    } catch (error) {
+      console.warn('Unable to read dashboard preferences', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem('dashboard-preferences', JSON.stringify(preferences));
+  }, [preferences]);
+
   const handleFilterChange = useCallback((newFilters: TransactionFilters) => {
     setFilters(newFilters);
+  }, []);
+
+  const handleWidgetDrop = useCallback((targetId: DashboardWidgetId) => {
+    if (!draggedWidget || draggedWidget === targetId) {
+      return;
+    }
+
+    setPreferences((current) => ({
+      ...current,
+      widgets: reorderDashboardWidgets(current.widgets, draggedWidget, targetId),
+    }));
+    setDraggedWidget(null);
+  }, [draggedWidget]);
+
+  const handleVisibilityToggle = useCallback((widgetId: DashboardWidgetId, visible: boolean) => {
+    setPreferences((current) => updateVisibleWidgets(current, widgetId, visible));
   }, []);
 
   const styles = {
@@ -54,7 +98,7 @@ export const Dashboard: React.FC = () => {
       padding: '2rem',
       borderRadius: '16px',
       boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.3), 0 10px 10px -5px rgba(0, 0, 0, 0.3)',
-      maxWidth: '960px',
+      maxWidth: '1180px',
       margin: '2rem auto',
       border: '1px solid #1e293b',
     },
@@ -174,9 +218,53 @@ export const Dashboard: React.FC = () => {
     },
   };
 
+  const widgetCards = preferences.widgets.map((widgetId) => {
+    const isVisible = preferences.visibleWidgets.includes(widgetId);
+    if (!isVisible) {
+      return null;
+    }
+
+    if (widgetId === 'daily-volume') {
+      return (
+        <div key={widgetId} draggable onDragStart={() => setDraggedWidget(widgetId)} onDragOver={(event) => event.preventDefault()} onDrop={() => handleWidgetDrop(widgetId)}>
+          <MetricWidget title="Daily volume" subtitle="Rolling 24h value" value="$2.84M" tone="success" />
+        </div>
+      );
+    }
+
+    if (widgetId === 'active-accounts') {
+      return (
+        <div key={widgetId} draggable onDragStart={() => setDraggedWidget(widgetId)} onDragOver={(event) => event.preventDefault()} onDrop={() => handleWidgetDrop(widgetId)}>
+          <MetricWidget title="Active accounts" subtitle="Unique wallets in motion" value="18.4K" tone="info" />
+        </div>
+      );
+    }
+
+    return (
+      <div key={widgetId} draggable onDragStart={() => setDraggedWidget(widgetId)} onDragOver={(event) => event.preventDefault()} onDrop={() => handleWidgetDrop(widgetId)}>
+        <TrendChart title="Transaction activity" data={[{ label: 'Mon', value: 120 }, { label: 'Tue', value: 190 }, { label: 'Wed', value: 145 }, { label: 'Thu', value: 230 }, { label: 'Fri', value: 260 }]} kind="line" />
+      </div>
+    );
+  });
+
   return (
     <div style={styles.container}>
       <h2 style={styles.header}>Transaction Analytics</h2>
+
+      <div style={{ marginBottom: '1.5rem', padding: '1rem', borderRadius: '12px', backgroundColor: '#111827', border: '1px solid #334155' }}>
+        <div style={{ fontSize: '0.95rem', fontWeight: 700, marginBottom: '0.75rem' }}>Widget layout</div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.75rem' }}>
+          {preferences.widgets.map((widgetId) => {
+            const isVisible = preferences.visibleWidgets.includes(widgetId);
+            return (
+              <label key={widgetId} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#cbd5e1', fontSize: '0.85rem' }}>
+                <input type="checkbox" checked={isVisible} onChange={(event) => handleVisibilityToggle(widgetId, event.target.checked)} />
+                <span>{widgetId === 'daily-volume' ? 'Daily volume' : widgetId === 'active-accounts' ? 'Active accounts' : 'Transaction activity'}</span>
+              </label>
+            );
+          })}
+        </div>
+      </div>
 
       <AdvancedSearchPanel filters={filters} onChange={handleFilterChange} />
 
@@ -189,6 +277,11 @@ export const Dashboard: React.FC = () => {
           <div style={styles.metrics}>
             {data?.length ?? 0} transaction{data?.length !== 1 ? 's' : ''} found.
           </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1rem', marginBottom: '1.5rem' }}>
+            {widgetCards}
+          </div>
+
           <div style={styles.chartCard}>
             {chartData.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
